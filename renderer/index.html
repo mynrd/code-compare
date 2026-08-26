@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Code Compare</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="mode-toggle">
+      <button id="mode-folder" class="active">Folder</button>
+      <button id="mode-file">File</button>
+    </div>
+    <div class="paths">
+      <div class="path-row">
+        <label>Left</label>
+        <input id="left-path" type="text" placeholder="Paste a path or click Browse…" />
+        <button id="pick-left">Browse…</button>
+      </div>
+      <div class="path-row">
+        <label>Right</label>
+        <input id="right-path" type="text" placeholder="Paste a path or click Browse…" />
+        <button id="pick-right">Browse…</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="compare-btn">Compare</button>
+      <div class="recent-wrap">
+        <button id="recent-btn" class="ghost" title="Recent compares">Recent ▾</button>
+        <div id="recent-menu" class="popover hidden"></div>
+      </div>
+      <button id="settings-btn" class="ghost" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main id="main-folder">
+    <section id="tree-pane">
+      <div class="pane-header">
+        <span>Files</span>
+        <span id="summary"></span>
+        <div class="filters">
+          <label><input type="checkbox" id="show-same" /> show unchanged</label>
+        </div>
+      </div>
+      <div id="tree-search-bar">
+        <input id="tree-search" type="text" placeholder="Search files…" autocomplete="off" spellcheck="false" />
+      </div>
+      <div id="tree-list"></div>
+    </section>
+
+    <div id="resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+
+    <section id="diff-pane">
+      <div id="toolbar" class="toolbar">
+        <button data-act="swap" disabled title="Swap left and right paths and re-compare">⇄ Swap</button>
+        <span class="sep"></span>
+        <button data-act="refresh" disabled title="Reload selected file from disk">↻ Refresh</button>
+        <span class="sep"></span>
+        <button data-act="copy-to-left" disabled title="Copy right → left">⬅ Copy</button>
+        <button data-act="copy-to-right" disabled title="Copy left → right">Copy ➡</button>
+        <span class="sep"></span>
+        <button data-act="save" disabled title="Commit pending changes on this file (Ctrl+S)">💾 Save</button>
+        <button data-act="save-all" disabled title="Commit all pending changes">Save All</button>
+        <button data-act="revert" disabled title="Undo the most recent change on this file">↶ Revert</button>
+        <span class="sep"></span>
+        <button data-act="prev-change" disabled title="Previous change (Alt+↑)">▲ Prev</button>
+        <button data-act="next-change" disabled title="Next change (Alt+↓)">▼ Next</button>
+        <span class="sep"></span>
+        <button data-act="zoom-out" title="Zoom out (Ctrl+−)">−</button>
+        <span id="zoom-pct" title="Current zoom">100%</span>
+        <button data-act="zoom-in" title="Zoom in (Ctrl+=)">+</button>
+        <button data-act="zoom-reset" title="Reset zoom (Ctrl+0)">⟲</button>
+      </div>
+      <div class="diff-headers">
+        <div class="diff-header-left"><span id="diff-title-left">Left</span></div>
+        <div class="diff-header-right"><span id="diff-title-right">Right</span></div>
+      </div>
+      <div id="diff-view-wrap">
+        <div id="diff-view"></div>
+        <canvas id="diff-minimap" title="Click to jump"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content wide">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="settings-close" class="ghost">✕</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="tab active" data-tab="general">General</button>
+        <button class="tab" data-tab="file-scan">File Scan</button>
+        <button class="tab" data-tab="ignore">Ignore Patterns</button>
+      </div>
+      <div class="modal-body">
+        <div class="tab-panel active" id="tab-general">
+          <div class="hint">These options apply when comparing files (both side-by-side diff and the folder-tree modified/same classification).</div>
+          <label class="check-row"><input type="checkbox" id="opt-ws" /> <span>Ignore white space <em>(trims and collapses spaces/tabs on each line)</em></span></label>
+          <label class="check-row"><input type="checkbox" id="opt-comments" /> <span>Ignore comments <em>(strips <code>/* … */</code> and <code>// …</code> style comments)</em></span></label>
+          <label class="check-row"><input type="checkbox" id="opt-lb" /> <span>Ignore line breaks <em>(normalizes CRLF/LF and drops blank lines)</em></span></label>
+        </div>
+        <div class="tab-panel" id="tab-file-scan">
+          <div class="hint">Only files matching the active group are scanned. Patterns use <code>*</code> and <code>?</code> as wildcards against the file basename. Leave the active group empty to scan all files.</div>
+          <div class="active-row">
+            <label>Active group</label>
+            <select id="active-group"></select>
+          </div>
+          <div class="groups-layout">
+            <div class="groups-list-wrap">
+              <div id="groups-list"></div>
+              <button id="group-new" class="ghost full">+ New group</button>
+            </div>
+            <div class="group-editor">
+              <label>Group name</label>
+              <input id="group-name" type="text" placeholder="(select a group)" />
+              <label>Patterns (one per line)</label>
+              <textarea id="group-patterns" spellcheck="false" placeholder="*.cs&#10;*.csproj"></textarea>
+              <div class="group-editor-actions">
+                <button id="group-delete" class="ghost">Delete this group</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tab-panel" id="tab-ignore">
+          <div class="hint">One pattern per line. A plain name (e.g. <code>node_modules</code>) matches that basename anywhere in the tree. A pattern containing <code>/</code> (e.g. <code>API/test/Foo/TestResults</code>) matches that exact relative path from the compare root.</div>
+          <textarea id="ignore-list" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span id="config-status" class="status"></span>
+        <button id="settings-reset" class="ghost">Reset current tab</button>
+        <button id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="folder-ctx-menu" class="ctx-menu hidden">
+    <div class="ctx-item" id="ctx-refresh-folder">↻ Refresh</div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

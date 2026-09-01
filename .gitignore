@@ -45,3 +45,6 @@ Desktop.ini
 .cache/
 .parcel-cache/
 .eslintcache
+
+# mynrd-flow local work folders
+.work/

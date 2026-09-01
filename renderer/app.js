@@ -1,5 +1,17 @@
 const DEFAULT_IGNORES = ['.git', 'node_modules', 'dist', 'build', '.vs', 'bin', 'obj', '.next', '.cache'];
 
+// Pure diff/merge/tree logic lives in compare-core.js (shared with tests).
+const {
+  anyCompareOpt,
+  textsEqualUnderOptions,
+  splitLines,
+  buildRows,
+  charDiff,
+  mergeLine,
+  mergeHunk,
+  buildTree
+} = window.CompareCore;
+
 const state = {
   mode: 'folder',
   left: null,
@@ -11,6 +23,9 @@ const state = {
   compareOptions: { ignoreWhitespace: false, ignoreComments: false, ignoreLineBreaks: false },
   currentDiff: null,
   history: [],
+  // Row model of the current side-by-side render (from CompareCore.buildRows);
+  // needed by the per-line/per-block merge buttons.
+  rows: null,
   hunkRows: [],
   changeRows: [],
   hunkIdx: -1,
@@ -182,46 +197,6 @@ document.addEventListener('click', (e) => {
 
 // ---------- tree ----------
 
-function buildTree(items) {
-  const root = mkDir('', '');
-  for (const it of items) {
-    const parts = it.path.split('/');
-    let node = root;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const name = parts[i];
-      if (!node.children.has(name)) {
-        node.children.set(name, mkDir(name, parts.slice(0, i + 1).join('/')));
-      }
-      node = node.children.get(name);
-    }
-    const fileName = parts[parts.length - 1];
-    node.children.set(fileName, { name: fileName, path: it.path, isDir: false, item: it });
-  }
-  aggregate(root);
-  return root;
-}
-
-function mkDir(name, path) {
-  return {
-    name, path, isDir: true, children: new Map(),
-    counts: { 'only-left': 0, 'only-right': 0, modified: 0, same: 0 }
-  };
-}
-
-function aggregate(node) {
-  if (!node.isDir) return;
-  for (const child of node.children.values()) {
-    if (child.isDir) {
-      aggregate(child);
-      for (const k of Object.keys(node.counts)) node.counts[k] += child.counts[k];
-    } else {
-      node.counts[child.item.status]++;
-    }
-  }
-  node.status = (node.counts.modified || node.counts['only-left'] || node.counts['only-right'])
-    ? 'modified' : 'same';
-}
-
 function autoCollapseSame(node) {
   if (!node.isDir) return;
   for (const child of node.children.values()) {
@@ -376,6 +351,7 @@ function renderDiff(payload) {
   view.innerHTML = '';
   state.currentDiff = payload || null;
   state.hunkRows = []; state.changeRows = []; state.hunkIdx = -1;
+  state.rows = null;
   state.leftDisp = null; state.rightDisp = null;
   state.leftAbs = payload ? (payload.leftAbs || null) : null;
   state.rightAbs = payload ? (payload.rightAbs || null) : null;
@@ -430,46 +406,6 @@ function renderDiff(payload) {
   collectHunks();
   updateDirtyHeader();
   updateToolbar();
-}
-
-function anyCompareOpt(o) {
-  return !!(o && (o.ignoreWhitespace || o.ignoreComments || o.ignoreLineBreaks));
-}
-
-function maskBlockComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-}
-
-function buildCompareKey(line, opts) {
-  let k = line;
-  if (opts.ignoreComments) {
-    k = k.replace(/(^|[^:])\/\/.*$/, '$1');
-  }
-  if (opts.ignoreWhitespace) {
-    k = k.trim().replace(/\s+/g, ' ');
-  }
-  return k;
-}
-
-function textToKeys(text, opts) {
-  let t = text;
-  if (opts.ignoreComments) t = maskBlockComments(t);
-  const lines = t.split('\n');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return lines.map(l => buildCompareKey(l, opts));
-}
-
-function textsEqualUnderOptions(a, b, opts) {
-  if (!anyCompareOpt(opts)) return a === b;
-  let aKeys = textToKeys(a, opts);
-  let bKeys = textToKeys(b, opts);
-  if (opts.ignoreLineBreaks) {
-    aKeys = aKeys.filter(l => l.length > 0);
-    bKeys = bKeys.filter(l => l.length > 0);
-  }
-  if (aKeys.length !== bKeys.length) return false;
-  for (let i = 0; i < aKeys.length; i++) if (aKeys[i] !== bKeys[i]) return false;
-  return true;
 }
 
 function btn(act) { return document.querySelector(`#toolbar button[data-act="${act}"]`); }
@@ -764,8 +700,8 @@ function collectHunks() {
   const rows = tbl.querySelectorAll('tbody tr');
   let inHunk = false;
   for (const tr of rows) {
-    const cls = tr.className;
-    const isChange = cls === 'mod' || cls === 'del' || cls === 'add';
+    const cl = tr.classList;
+    const isChange = cl.contains('mod') || cl.contains('del') || cl.contains('add');
     if (isChange) {
       state.changeRows.push(tr);
       if (!inHunk) { state.hunkRows.push(tr); inHunk = true; }
@@ -848,15 +784,15 @@ function drawMinimap() {
   ctx.clearRect(0, 0, cssW, cssH);
 
   const total = tbl.offsetHeight || 1;
-  const colorFor = (cls) =>
-    cls === 'add' ? '#6a9955' :
-    cls === 'del' ? '#f48771' :
-    /* mod */     '#dcdcaa';
+  const colorFor = (tr) =>
+    tr.classList.contains('add') ? '#6a9955' :
+    tr.classList.contains('del') ? '#f48771' :
+    /* mod */                      '#dcdcaa';
 
   for (const tr of state.changeRows) {
     const y = Math.floor(tr.offsetTop / total * cssH);
     const h = Math.max(2, Math.floor((tr.offsetHeight || 1) / total * cssH));
-    ctx.fillStyle = colorFor(tr.className);
+    ctx.fillStyle = colorFor(tr);
     ctx.fillRect(0, y, cssW, h);
   }
 
@@ -953,6 +889,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); jumpHunk(1);
   } else if (e.altKey && e.key === 'ArrowUp') {
     e.preventDefault(); jumpHunk(-1);
+  } else if (e.altKey && e.key === 'ArrowRight') {
+    e.preventDefault(); mergeCurrentHunk('to-right');
+  } else if (e.altKey && e.key === 'ArrowLeft') {
+    e.preventDefault(); mergeCurrentHunk('to-left');
   } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
     e.preventDefault(); zoomBy(1);
   } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
@@ -962,38 +902,93 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// Fill a code cell; when d (a charDiff result) is present, wrap the differing
+// middle of the line in a highlight span (Devart-style intra-line diff).
+function setCodeCell(td, text, d, which) {
+  if (!d) { td.textContent = text; return; }
+  const mid = which === 'a' ? d.aMid : d.bMid;
+  td.textContent = '';
+  if (d.prefix) td.append(text.slice(0, d.prefix));
+  if (mid) {
+    const span = document.createElement('span');
+    span.className = which === 'a' ? 'inline-del' : 'inline-add';
+    span.textContent = mid;
+    td.append(span);
+  }
+  if (d.suffix) td.append(text.slice(text.length - d.suffix));
+}
+
+function mergeButton(dir, scope) {
+  const b = document.createElement('button');
+  b.className = 'merge-btn' + (scope === 'block' ? ' block' : '');
+  b.dataset.dir = dir;
+  b.dataset.scope = scope;
+  b.tabIndex = -1;
+  if (scope === 'block') {
+    b.textContent = dir === 'to-right' ? '»' : '«';
+    b.title = dir === 'to-right' ? 'Copy this block to the right file' : 'Copy this block to the left file';
+  } else {
+    b.textContent = dir === 'to-right' ? '›' : '‹';
+    b.title = dir === 'to-right' ? 'Copy this line to the right file' : 'Copy this line to the left file';
+  }
+  return b;
+}
+
 function renderSideBySide(view, leftText, rightText, opts) {
-  const rows = buildRows(leftText, rightText, opts);
+  const rows = buildRows(leftText, rightText, {
+    ...opts, compareOptions: state.compareOptions
+  });
+  state.rows = rows;
   const tbl = document.createElement('table');
   tbl.className = 'sbs-table';
   tbl.innerHTML = `<colgroup>
     <col class="gutter-col"><col class="code-col">
+    <col class="merge-col">
     <col class="gutter-col"><col class="code-col">
   </colgroup>`;
   const tbody = document.createElement('tbody');
   const canEditLeft = !!state.leftAbs;
   const canEditRight = !!state.rightAbs;
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     const tr = document.createElement('tr');
     tr.className = r.type;
+    tr.dataset.row = String(i);
+    const isChange = r.type !== 'eq';
+    const hunkStart = isChange && (i === 0 || rows[i - 1].type === 'eq');
+    if (hunkStart) tr.classList.add('hunk-start');
     tr.innerHTML = `
       <td class="gutter gutter-left"></td>
       <td class="code code-left"></td>
+      <td class="merge"></td>
       <td class="gutter gutter-right"></td>
       <td class="code code-right"></td>`;
     tr.children[0].textContent = r.leftLine;
-    tr.children[1].textContent = r.leftCode;
-    tr.children[2].textContent = r.rightLine;
-    tr.children[3].textContent = r.rightCode;
+    tr.children[3].textContent = r.rightLine;
+    const d = r.type === 'mod' ? charDiff(r.leftCode, r.rightCode) : null;
+    setCodeCell(tr.children[1], r.leftCode, d, 'a');
+    setCodeCell(tr.children[4], r.rightCode, d, 'b');
     if (canEditLeft && r.leftLine !== '') {
       tr.children[1].contentEditable = 'plaintext-only';
       tr.children[1].dataset.side = 'left';
       tr.children[1].dataset.line = String(r.leftLine);
     }
     if (canEditRight && r.rightLine !== '') {
-      tr.children[3].contentEditable = 'plaintext-only';
-      tr.children[3].dataset.side = 'right';
-      tr.children[3].dataset.line = String(r.rightLine);
+      tr.children[4].contentEditable = 'plaintext-only';
+      tr.children[4].dataset.side = 'right';
+      tr.children[4].dataset.line = String(r.rightLine);
+    }
+    if (isChange) {
+      const cell = tr.children[2];
+      // Line-level merge arrows; block-level double arrows on the first row
+      // of each changed block. Only offer a direction when the target file
+      // exists on disk (otherwise use the toolbar Copy for whole files).
+      if (canEditLeft && canEditRight && hunkStart) {
+        cell.appendChild(mergeButton('to-right', 'block'));
+        cell.appendChild(mergeButton('to-left', 'block'));
+      }
+      if (canEditRight) cell.appendChild(mergeButton('to-right', 'line'));
+      if (canEditLeft) cell.appendChild(mergeButton('to-left', 'line'));
     }
     tbody.appendChild(tr);
   }
@@ -1001,6 +996,13 @@ function renderSideBySide(view, leftText, rightText, opts) {
   view.appendChild(tbl);
 
   tbl.addEventListener('input', onCellInput);
+  tbl.addEventListener('click', (e) => {
+    const b = e.target.closest('button.merge-btn');
+    if (!b) return;
+    e.preventDefault();
+    const tr = b.closest('tr');
+    doMerge(parseInt(tr.dataset.row, 10), b.dataset.dir, b.dataset.scope);
+  });
   // Block Enter to keep one displayed row = one source line. Multi-line
   // restructuring would require re-running the diff mid-keystroke.
   tbl.addEventListener('keydown', (e) => {
@@ -1008,6 +1010,41 @@ function renderSideBySide(view, leftText, rightText, opts) {
       e.preventDefault();
     }
   });
+}
+
+// ---- Line / block merge (Devart-style copy to the other side) ----
+
+function doMerge(rowIdx, direction, scope) {
+  if (!state.rows || Number.isNaN(rowIdx)) return;
+  const fn = scope === 'block' ? mergeHunk : mergeLine;
+  const res = fn(state.rows, rowIdx, direction, state.leftDisp || [], state.rightDisp || []);
+  if (!res.changed) return;
+  const abs = res.side === 'right' ? state.rightAbs : state.leftAbs;
+  if (!abs) return;
+  const lines = res.side === 'right' ? res.right : res.left;
+  const text = lines.join('\n');
+  state.dirty.set(abs, text);
+  scheduleTempWrite(abs, res.side, text);
+  // Re-render (renderDiff prefers dirty buffers) but keep the scroll position
+  // so repeated merges don't bounce the viewport.
+  const view = $('diff-view');
+  const st = view.scrollTop;
+  renderDiff(state.currentDiff);
+  view.scrollTop = st;
+  drawMinimap();
+}
+
+function mergeCurrentHunk(direction) {
+  if (!state.hunkRows.length) return;
+  // Use the highlighted hunk if there is one, otherwise the hunk at the top
+  // of the viewport (same rule Prev/Next use).
+  let tr = state.hunkIdx >= 0 ? state.hunkRows[state.hunkIdx] : null;
+  if (!tr) {
+    const at = findHunkIdxAtScroll();
+    tr = state.hunkRows[Math.max(0, at)];
+  }
+  if (!tr) return;
+  doMerge(parseInt(tr.dataset.row, 10), direction, 'block');
 }
 
 function onCellInput(e) {
@@ -1054,116 +1091,6 @@ function updateDirtyHeader() {
   const rDirty = state.rightAbs && state.dirty.has(state.rightAbs);
   $('diff-title-left').textContent = (lDirty ? '● ' : '') + (d.leftTitle || 'Left');
   $('diff-title-right').textContent = (rDirty ? '● ' : '') + (d.rightTitle || 'Right');
-}
-
-function buildRows(leftText, rightText, opts) {
-  if (opts.leftMissing) {
-    return splitLines(rightText).map((ln, i) => ({
-      type: 'add', leftLine: '', leftCode: '', rightLine: i + 1, rightCode: ln
-    }));
-  }
-  if (opts.rightMissing) {
-    return splitLines(leftText).map((ln, i) => ({
-      type: 'del', leftLine: i + 1, leftCode: ln, rightLine: '', rightCode: ''
-    }));
-  }
-  const co = state.compareOptions;
-  const leftDisp = splitLines(leftText);
-  const rightDisp = splitLines(rightText);
-  const leftKeys = textToKeys(leftText, co);
-  const rightKeys = textToKeys(rightText, co);
-  while (leftKeys.length < leftDisp.length) leftKeys.push('');
-  while (rightKeys.length < rightDisp.length) rightKeys.push('');
-  while (leftKeys.length > leftDisp.length) leftKeys.pop();
-  while (rightKeys.length > rightDisp.length) rightKeys.pop();
-
-  const ops = diffOps(leftKeys, rightKeys);
-  const blocks = mergeBlocks(ops);
-  const rows = [];
-  let lN = 1, rN = 1;
-  for (let b = 0; b < blocks.length; b++) {
-    const block = blocks[b];
-    if (block.type === 'eq') {
-      for (let z = 0; z < block.left.length; z++) {
-        rows.push({
-          type: 'eq',
-          leftLine: lN++, leftCode: leftDisp[block.left[z]],
-          rightLine: rN++, rightCode: rightDisp[block.right[z]]
-        });
-      }
-    } else if (block.type === 'del') {
-      const next = blocks[b + 1];
-      if (next && next.type === 'add') {
-        const max = Math.max(block.left.length, next.right.length);
-        for (let z = 0; z < max; z++) {
-          const hasL = z < block.left.length, hasR = z < next.right.length;
-          rows.push({
-            type: hasL && hasR ? 'mod' : (hasL ? 'del' : 'add'),
-            leftLine: hasL ? lN++ : '',
-            leftCode: hasL ? leftDisp[block.left[z]] : '',
-            rightLine: hasR ? rN++ : '',
-            rightCode: hasR ? rightDisp[next.right[z]] : ''
-          });
-        }
-        b++;
-      } else {
-        for (const li of block.left) {
-          rows.push({ type: 'del', leftLine: lN++, leftCode: leftDisp[li], rightLine: '', rightCode: '' });
-        }
-      }
-    } else if (block.type === 'add') {
-      for (const ri of block.right) {
-        rows.push({ type: 'add', leftLine: '', leftCode: '', rightLine: rN++, rightCode: rightDisp[ri] });
-      }
-    }
-  }
-  return rows;
-}
-
-function splitLines(s) {
-  const arr = s.split('\n');
-  if (arr.length && arr[arr.length - 1] === '') arr.pop();
-  return arr;
-}
-
-function diffOps(aKeys, bKeys) {
-  const n = aKeys.length, m = bKeys.length;
-  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      if (aKeys[i] === bKeys[j]) dp[i][j] = dp[i+1][j+1] + 1;
-      else dp[i][j] = Math.max(dp[i+1][j], dp[i][j+1]);
-    }
-  }
-  const out = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (aKeys[i] === bKeys[j]) { out.push({ type: 'eq', i, j }); i++; j++; }
-    else if (dp[i+1][j] >= dp[i][j+1]) { out.push({ type: 'del', i }); i++; }
-    else { out.push({ type: 'add', j }); j++; }
-  }
-  while (i < n) { out.push({ type: 'del', i }); i++; }
-  while (j < m) { out.push({ type: 'add', j }); j++; }
-  return out;
-}
-
-function mergeBlocks(ops) {
-  const blocks = [];
-  for (const op of ops) {
-    const last = blocks[blocks.length - 1];
-    if (last && last.type === op.type) {
-      if (op.type === 'eq') { last.left.push(op.i); last.right.push(op.j); }
-      else if (op.type === 'del') last.left.push(op.i);
-      else last.right.push(op.j);
-    } else if (op.type === 'eq') {
-      blocks.push({ type: 'eq', left: [op.i], right: [op.j] });
-    } else if (op.type === 'del') {
-      blocks.push({ type: 'del', left: [op.i], right: [] });
-    } else {
-      blocks.push({ type: 'add', left: [], right: [op.j] });
-    }
-  }
-  return blocks;
 }
 
 // ---------- settings modal ----------

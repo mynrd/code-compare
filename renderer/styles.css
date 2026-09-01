@@ -186,7 +186,8 @@ section { display: flex; flex-direction: column; overflow: hidden; }
   background: #094771; color: #fff;
 }
 .sbs-table colgroup .gutter-col { width: 50px; }
-.sbs-table colgroup .code-col { width: calc((100% - 100px) / 2); }
+.sbs-table colgroup .merge-col { width: 52px; }
+.sbs-table colgroup .code-col { width: calc((100% - 152px) / 2); }
 .sbs-table td {
   padding: 0 8px; vertical-align: top; white-space: pre;
   overflow: hidden; text-overflow: clip;
@@ -207,6 +208,25 @@ section { display: flex; flex-direction: column; overflow: hidden; }
 .sbs-table td.code[contenteditable] { outline: none; cursor: text; caret-color: #fff; }
 .sbs-table td.code[contenteditable]:focus { background: #2a3a4a; }
 .sbs-table td.code.edited { box-shadow: inset 3px 0 0 #dcdcaa; }
+
+/* intra-line (character-level) difference highlight on modified rows */
+.sbs-table tr.mod td.code-left .inline-del { background: #6e2b2b; color: #ffb3a6; border-radius: 2px; }
+.sbs-table tr.mod td.code-right .inline-add { background: #2b5a2b; color: #d6f0c8; border-radius: 2px; }
+
+/* merge (copy line/block to other side) column between the panes */
+.sbs-table td.merge {
+  padding: 0 2px; text-align: center; user-select: none;
+  background: #252526; border-left: 1px solid #2a2a2a; border-right: 1px solid #2a2a2a;
+  white-space: nowrap; overflow: visible;
+}
+.merge-btn {
+  background: transparent; color: #888; border: none;
+  padding: 0 2px; margin: 0; font: inherit; font-weight: bold;
+  cursor: pointer; opacity: 0.35; line-height: inherit;
+}
+.merge-btn.block { color: #4fc1ff; }
+.sbs-table tr:hover .merge-btn { opacity: 1; }
+.merge-btn:hover { color: #fff; background: #3f3f46; border-radius: 2px; }
 
 .empty, .notice {
   padding: 16px; color: #888; font-style: italic;

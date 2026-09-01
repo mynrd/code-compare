@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fsCore = require('./lib/fs-core');
+const gitCore = require('./lib/git-core');
 const { createConfigStore, createTempStore } = require('./lib/store');
 
 let configStore = null;
@@ -67,3 +68,23 @@ ipcMain.handle('temp-read', (_e, args) => stores().tempStore.read(args));
 ipcMain.handle('temp-delete', (_e, args) => stores().tempStore.remove(args));
 ipcMain.handle('temp-list', () => stores().tempStore.list());
 ipcMain.handle('apply-temp', (_e, args) => stores().tempStore.apply(args));
+
+// --- git (all git access lives in the main process; the renderer never gets a shell) ---
+ipcMain.handle('git-has-git', () => gitCore.hasGit());
+ipcMain.handle('git-repo-root', (_e, { dir, root }) => gitCore.repoRoot(dir || root));
+ipcMain.handle('git-current-branch', (_e, { root }) => gitCore.currentBranch(root));
+ipcMain.handle('git-list-branches', (_e, { root }) => gitCore.listBranches(root));
+ipcMain.handle('git-diff-name-status', (_e, { root, base, compare }) =>
+  gitCore.diffNameStatus(root, base, compare));
+ipcMain.handle('git-show-file', (_e, { root, ref, path: filePath }) =>
+  gitCore.showFile(root, ref, filePath));
+ipcMain.handle('git-log', (_e, { root, ...opts }) => gitCore.log(root, opts));
+ipcMain.handle('git-commit-files', (_e, { root, sha }) => gitCore.commitFiles(root, sha));
+ipcMain.handle('git-parent-of', (_e, { root, sha }) => gitCore.parentOf(root, sha));
+
+ipcMain.handle('pick-repo', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  if (r.canceled) return { root: null, canceled: true };
+  const root = await gitCore.repoRoot(r.filePaths[0]);
+  return root ? { root } : { root: null, error: 'Not a git repository' };
+});

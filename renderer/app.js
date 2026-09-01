@@ -198,6 +198,7 @@ async function loadRepo(root) {
   fillBranchSelects();
   resetCommitsUI();
   updateToolbar();
+  await rememberRepo(root);
 }
 
 function resetRepo(msg) {
@@ -235,10 +236,14 @@ $('pick-repo').onclick = async () => {
   await loadRepo(r.root);
 };
 
-$('git-base').onchange = (e) => { state.git.base = e.target.value || null; };
+$('git-base').onchange = (e) => {
+  state.git.base = e.target.value || null;
+  dropHistoryPath();
+};
 $('git-compare').onchange = (e) => {
   state.git.compare = e.target.value || null;
   // The commit list always follows the Compare ref.
+  dropHistoryPath();
   loadCommits({ reset: true });
 };
 
@@ -286,6 +291,7 @@ async function runGitCompare() {
   $('tree-search').value = '';
   renderTree();
   renderDiff(null);
+  dropHistoryPath();
   await loadCommits({ reset: true });
 }
 
@@ -352,7 +358,51 @@ function resetCommitsUI() {
   commitSeq++;
   $('commit-search').value = '';
   $('commit-pickaxe').checked = false;
+  state.git.historyPath = null;
+  syncCommitsHeader();
   renderCommits();
+}
+
+// ---- file history (path-filtered commit log) ----
+
+// The Commits pane doubles as a per-file history: the header switches to
+// "History: <path>" with a ✕ that drops back to the branch log.
+function syncCommitsHeader() {
+  const p = state.git.historyPath;
+  const title = $('commits-title');
+  title.textContent = p ? `History: ${p}` : 'Commits';
+  title.classList.toggle('history', !!p);
+  title.title = p ? `Commits touching ${p} (git log --follow)` : '';
+  $('history-clear').classList.toggle('hidden', !p);
+}
+
+// Called from the file-row context menu in git mode.
+async function showFileHistory(it) {
+  if (state.mode !== 'git' || !it) return;
+  const g = state.git;
+  // For a rename we follow the NEW path; --follow reaches the old name.
+  g.historyPath = it.path;
+  g.commitQuery = '';
+  g.commitPickaxe = false;
+  if (commitSearchTimer) { clearTimeout(commitSearchTimer); commitSearchTimer = null; }
+  $('commit-search').value = '';
+  $('commit-pickaxe').checked = false;
+  syncCommitsHeader();
+  await loadCommits({ reset: true });
+}
+
+async function clearFileHistory() {
+  if (!state.git.historyPath) return;
+  state.git.historyPath = null;
+  syncCommitsHeader();
+  await loadCommits({ reset: true });
+}
+
+// Leaves the commit list alone (callers reload it themselves).
+function dropHistoryPath() {
+  if (!state.git.historyPath) return;
+  state.git.historyPath = null;
+  syncCommitsHeader();
 }
 
 // Merge two log pages (message hits + author hits), newest first.
@@ -532,6 +582,17 @@ async function selectCommit(c) {
   if (!g.selectedCommit || g.selectedCommit.sha !== c.sha) return;
   g.commitFiles = files;
   renderCommits();
+  // In history mode the commit row itself is a shortcut to "this file at this
+  // commit" — the accordion still lists the commit's other files.
+  if (g.historyPath) await selectCommitFile(c, historyFileEntry(files, g.historyPath));
+}
+
+// The commit's entry for the followed path. The log is path-filtered so the
+// commit did touch it; across a rename the entry may carry the old name.
+function historyFileEntry(files, historyPath) {
+  return (files || []).find(f => f.path === historyPath)
+      || (files || []).find(f => f.oldPath === historyPath)
+      || { path: historyPath, status: 'modified' };
 }
 
 async function gitShowOrNull(root, ref, path) {
@@ -675,6 +736,25 @@ async function rememberPair() {
   });
 }
 
+// Git repositories join the same Recent list as folder/file pairs. left/right
+// are filled with the root so the entry looks like the others to anything that
+// assumes a pair (the config store itself keeps entries verbatim).
+async function rememberRepo(root) {
+  if (!root) return;
+  const entry = { mode: 'git', root, left: root, right: root, ts: Date.now() };
+  const filtered = state.recent.filter(r => !(r.mode === 'git' && r.root === root));
+  state.recent = [entry, ...filtered].slice(0, 10);
+  await window.api.saveConfig({ recent: state.recent });
+}
+
+async function openRecentGit(root) {
+  if (!root) return;
+  setMode('git');
+  $('repo-path').value = root;
+  if (!(await ensureGitAvailable())) return;
+  await loadRepo(root);
+}
+
 function renderRecentMenu() {
   const menu = $('recent-menu');
   menu.innerHTML = '';
@@ -684,21 +764,35 @@ function renderRecentMenu() {
   }
   for (const r of state.recent) {
     const item = document.createElement('div');
-    item.className = 'popover-item';
-    item.innerHTML = `
-      <div><span class="mode"></span><span class="ts"></span></div>
-      <div class="pair"><span class="l"></span><span class="arrow">↔</span><span class="r"></span></div>`;
-    item.querySelector('.mode').textContent = r.mode;
-    item.querySelector('.ts').textContent = fmtTs(r.ts);
-    item.querySelector('.l').textContent = r.left;
-    item.querySelector('.r').textContent = r.right;
-    item.onclick = () => {
-      closeRecent();
-      setMode(r.mode);
-      state.left = r.left; state.right = r.right;
-      $('left-path').value = r.left; $('right-path').value = r.right;
-      runCompare();
-    };
+    const isGit = r.mode === 'git';
+    item.className = 'popover-item' + (isGit ? ' git' : '');
+    if (isGit) {
+      item.innerHTML = `
+        <div><span class="mode"></span><span class="ts"></span></div>
+        <div class="pair"><span class="root"></span></div>`;
+      item.querySelector('.mode').textContent = 'git';
+      item.querySelector('.ts').textContent = fmtTs(r.ts);
+      item.querySelector('.root').textContent = r.root || r.left || '';
+      item.onclick = () => {
+        closeRecent();
+        openRecentGit(r.root || r.left);
+      };
+    } else {
+      item.innerHTML = `
+        <div><span class="mode"></span><span class="ts"></span></div>
+        <div class="pair"><span class="l"></span><span class="arrow">↔</span><span class="r"></span></div>`;
+      item.querySelector('.mode').textContent = r.mode;
+      item.querySelector('.ts').textContent = fmtTs(r.ts);
+      item.querySelector('.l').textContent = r.left;
+      item.querySelector('.r').textContent = r.right;
+      item.onclick = () => {
+        closeRecent();
+        setMode(r.mode);
+        state.left = r.left; state.right = r.right;
+        $('left-path').value = r.left; $('right-path').value = r.right;
+        runCompare();
+      };
+    }
     menu.appendChild(item);
   }
   const clear = document.createElement('div');
@@ -856,6 +950,12 @@ function mkFileRow(it, depth) {
   if (it.oldPath) row.title = `${it.oldPath} → ${it.path}`;
   row.querySelector('.size').textContent = formatSizes(it);
   row.onclick = () => selectItem(it);
+  if (state.mode === 'git') {
+    row.addEventListener('contextmenu', (e) => {
+      e.stopPropagation();
+      showFileMenu(e, it);
+    });
+  }
   return row;
 }
 
@@ -1086,6 +1186,7 @@ function hideFolderMenu() {
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#folder-ctx-menu')) hideFolderMenu();
+  if (!e.target.closest('#file-ctx-menu')) hideFileMenu();
 });
 
 $('ctx-refresh-folder').onclick = (e) => {
@@ -1093,6 +1194,38 @@ $('ctx-refresh-folder').onclick = (e) => {
   const node = ctxMenuNode;
   hideFolderMenu();
   if (node) doRefreshFolder(node);
+};
+
+// ---- File context menu (git mode) ----
+
+let ctxMenuItem = null;
+
+function showFileMenu(e, it) {
+  if (state.mode !== 'git') return;
+  e.preventDefault();
+  hideFolderMenu();
+  ctxMenuItem = it;
+  const menu = $('file-ctx-menu');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.remove('hidden');
+}
+
+function hideFileMenu() {
+  $('file-ctx-menu').classList.add('hidden');
+  ctxMenuItem = null;
+}
+
+$('ctx-file-history').onclick = (e) => {
+  e.stopPropagation();
+  const it = ctxMenuItem;
+  hideFileMenu();
+  if (it) showFileHistory(it);
+};
+
+$('history-clear').onclick = (e) => {
+  e.stopPropagation();
+  clearFileHistory();
 };
 
 async function doRefreshFolder(node) {

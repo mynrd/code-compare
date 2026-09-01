@@ -65,7 +65,8 @@
 
       <section id="commits-pane">
         <div class="pane-header">
-          <span>Commits</span>
+          <span id="commits-title">Commits</span>
+          <button id="history-clear" class="history-clear hidden" title="Back to the branch log">✕</button>
           <span id="commits-summary"></span>
         </div>
         <div id="commit-search-bar">
@@ -167,6 +168,10 @@
 
   <div id="folder-ctx-menu" class="ctx-menu hidden">
     <div class="ctx-item" id="ctx-refresh-folder">↻ Refresh</div>
+  </div>
+
+  <div id="file-ctx-menu" class="ctx-menu hidden">
+    <div class="ctx-item" id="ctx-file-history">⟲ History</div>
   </div>
 
   <script src="compare-core.js"></script>

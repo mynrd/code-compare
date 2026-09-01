@@ -62,6 +62,19 @@
         <input id="tree-search" type="text" placeholder="Search files…" autocomplete="off" spellcheck="false" />
       </div>
       <div id="tree-list"></div>
+
+      <section id="commits-pane">
+        <div class="pane-header">
+          <span>Commits</span>
+          <span id="commits-summary"></span>
+        </div>
+        <div id="commit-search-bar">
+          <input id="commit-search" type="text" placeholder="Search commits…" autocomplete="off" spellcheck="false" />
+          <label title="Search the commit contents (git log -S) instead of message/author/hash"><input type="checkbox" id="commit-pickaxe" /> in changes</label>
+        </div>
+        <div id="commit-list"></div>
+        <button id="commit-more" class="ghost full hidden">Load more</button>
+      </section>
     </section>
 
     <div id="resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>

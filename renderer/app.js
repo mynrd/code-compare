@@ -48,14 +48,36 @@ const state = {
   saveTimers: {},
   // Git mode. Extended by later slices (commit panel / file history); keep the
   // shape additive so nothing here has to be rewritten.
-  git: { root: null, branches: [], current: null, base: null, compare: null }
+  git: null // set to freshGitState() right below
 };
 
+// Commit-panel slice of git state. Split out so switching repositories can
+// reset just the commit list without touching the branch selection.
+function freshCommitState() {
+  return {
+    commits: [],
+    commitSkip: 0,
+    commitQuery: '',
+    commitPickaxe: false,
+    commitsExhausted: false,
+    selectedCommit: null,
+    commitFiles: [],
+    selectedCommitFile: null,
+    // Set by the file-history slice; already threaded into loadCommits().
+    historyPath: null
+  };
+}
+
 function freshGitState() {
-  return { root: null, branches: [], current: null, base: null, compare: null };
+  return {
+    root: null, branches: [], current: null, base: null, compare: null,
+    ...freshCommitState()
+  };
 }
 
 const $ = (id) => document.getElementById(id);
+
+state.git = freshGitState();
 
 function setMode(m) {
   state.mode = m;
@@ -72,6 +94,7 @@ function setMode(m) {
   $('repo-path').value = '';
   setGitError('');
   clearBranchSelects();
+  resetCommitsUI();
   renderTree();
   renderDiff(null);
   if (m === 'git') ensureGitAvailable();
@@ -165,6 +188,7 @@ async function loadRepo(root) {
   const names = branches.map(b => b.name);
   state.git = {
     ...state.git,
+    ...freshCommitState(),
     root,
     branches,
     current: current || null,
@@ -172,6 +196,7 @@ async function loadRepo(root) {
     compare: (current && names.includes(current)) ? current : mainBranchOf(names)
   };
   fillBranchSelects();
+  resetCommitsUI();
   updateToolbar();
 }
 
@@ -180,6 +205,7 @@ function resetRepo(msg) {
   state.git = freshGitState();
   state.items = []; state.tree = null; state.selected = null;
   clearBranchSelects();
+  resetCommitsUI();
   renderTree();
   renderDiff(null);
 }
@@ -210,7 +236,11 @@ $('pick-repo').onclick = async () => {
 };
 
 $('git-base').onchange = (e) => { state.git.base = e.target.value || null; };
-$('git-compare').onchange = (e) => { state.git.compare = e.target.value || null; };
+$('git-compare').onchange = (e) => {
+  state.git.compare = e.target.value || null;
+  // The commit list always follows the Compare ref.
+  loadCommits({ reset: true });
+};
 
 // git status letters -> the folder-tree item statuses the tree/diff code speaks.
 const GIT_STATUS_TO_ITEM = {
@@ -256,6 +286,7 @@ async function runGitCompare() {
   $('tree-search').value = '';
   renderTree();
   renderDiff(null);
+  await loadCommits({ reset: true });
 }
 
 // A side is editable only when its branch is the checked-out branch (and HEAD
@@ -305,6 +336,269 @@ async function selectItemGit(it) {
     editable: ed
   });
 }
+
+// ---------- commits panel ----------
+
+const COMMIT_PAGE = 200;
+// Every request carries a sequence number; a response whose number is stale
+// (the user typed again in the meantime) is dropped instead of rendering.
+let commitSeq = 0;
+let commitSearchTimer = null;
+
+function commitSearchText() { return (state.git.commitQuery || '').trim(); }
+
+function resetCommitsUI() {
+  if (commitSearchTimer) { clearTimeout(commitSearchTimer); commitSearchTimer = null; }
+  commitSeq++;
+  $('commit-search').value = '';
+  $('commit-pickaxe').checked = false;
+  renderCommits();
+}
+
+// Merge two log pages (message hits + author hits), newest first.
+function mergeCommitLists(a, b) {
+  const seen = new Set();
+  const out = [];
+  for (const c of [...(a || []), ...(b || [])]) {
+    if (!c || seen.has(c.sha)) continue;
+    seen.add(c.sha);
+    out.push(c);
+  }
+  out.sort((x, y) => (Date.parse(y.date) || 0) - (Date.parse(x.date) || 0));
+  return out;
+}
+
+// reset -> replace the list and start from skip 0; otherwise append the next
+// page starting at the number of commits already shown.
+async function loadCommits({ reset } = {}) {
+  const g = state.git;
+  if (!g.root || !g.compare) { renderCommits(); return; }
+  if (!(await ensureGitAvailable())) return;
+  const seq = ++commitSeq;
+  const text = commitSearchText();
+  const skip = reset ? 0 : g.commits.length;
+  const base = {
+    root: g.root,
+    ref: g.compare,
+    skip,
+    limit: COMMIT_PAGE,
+    path: g.historyPath || undefined
+  };
+  let batch = [];
+  try {
+    if (text && g.commitPickaxe) {
+      // "Search in changes" -> git log -S<text>; grep/author do not apply.
+      batch = await window.api.git.log({ ...base, pickaxe: text });
+    } else if (text) {
+      // Message (git-core also matches sha prefixes for hex-looking text) and
+      // author are two separate git invocations, merged newest-first.
+      const [byMsg, byAuthor] = await Promise.all([
+        window.api.git.log({ ...base, grep: text }),
+        window.api.git.log({ ...base, author: text })
+      ]);
+      batch = mergeCommitLists(byMsg, byAuthor).slice(0, COMMIT_PAGE);
+    } else {
+      batch = await window.api.git.log(base);
+    }
+  } catch (e) {
+    if (seq !== commitSeq) return;
+    setGitError(errText(e));
+    return;
+  }
+  if (seq !== commitSeq) return; // a newer request superseded this one
+  batch = batch || [];
+  if (reset) {
+    g.commits = batch;
+    g.selectedCommit = null;
+    g.commitFiles = [];
+    g.selectedCommitFile = null;
+  } else {
+    const seen = new Set(g.commits.map(c => c.sha));
+    for (const c of batch) if (!seen.has(c.sha)) g.commits.push(c);
+  }
+  g.commitSkip = g.commits.length;
+  g.commitsExhausted = batch.length < COMMIT_PAGE;
+  renderCommits();
+}
+
+// "3m ago" / "2h ago" / "5d ago" / "3mo ago" / "2y ago".
+function relTime(iso) {
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
+}
+
+function renderCommits() {
+  const list = $('commit-list');
+  const g = state.git;
+  const more = $('commit-more');
+  list.innerHTML = '';
+  const n = g.commits.length;
+  $('commits-summary').textContent = n
+    ? `${n}${g.commitsExhausted ? '' : '+'} commit${n === 1 ? '' : 's'}`
+    : '';
+  more.classList.toggle('hidden', !n || g.commitsExhausted);
+  more.disabled = !n || g.commitsExhausted;
+  if (!n) {
+    list.innerHTML = g.root
+      ? (commitSearchText() ? '<div class="empty">No commits match the search.</div>'
+                            : '<div class="empty">No commits.</div>')
+      : '<div class="empty">Pick a repository to list its commits.</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const c of g.commits) {
+    frag.appendChild(mkCommitRow(c));
+    if (g.selectedCommit && g.selectedCommit.sha === c.sha) {
+      frag.appendChild(mkCommitFileList(c));
+    }
+  }
+  list.appendChild(frag);
+}
+
+function mkCommitRow(c) {
+  const g = state.git;
+  const row = document.createElement('div');
+  row.className = 'commit-row';
+  if (g.selectedCommit && g.selectedCommit.sha === c.sha) row.classList.add('selected');
+  row.dataset.sha = c.sha;
+  row.innerHTML = '<span class="sha"></span><span class="subject"></span><span class="meta"></span>';
+  row.querySelector('.sha').textContent = c.short || c.sha.slice(0, 7);
+  row.querySelector('.subject').textContent = c.subject || '';
+  const rel = relTime(c.date);
+  row.querySelector('.meta').textContent = [c.author, rel].filter(Boolean).join(' · ');
+  row.title = `${c.sha}\n${c.subject || ''}\n${c.author || ''}${c.date ? ' — ' + c.date : ''}`;
+  row.onclick = () => selectCommit(c);
+  return row;
+}
+
+function mkCommitFileList(c) {
+  const g = state.git;
+  const wrap = document.createElement('div');
+  wrap.className = 'commit-files';
+  if (!g.commitFiles.length) {
+    wrap.innerHTML = '<div class="empty">No files in this commit.</div>';
+    return wrap;
+  }
+  for (const f of g.commitFiles) {
+    const status = GIT_STATUS_TO_ITEM[f.status] || 'modified';
+    const sym = { 'only-left': '◄', 'only-right': '►', 'modified': '≠', 'same': '=' }[status];
+    const row = document.createElement('div');
+    row.className = `commit-file ${status}`;
+    if (g.selectedCommitFile === f.path) row.classList.add('selected');
+    row.dataset.path = f.path;
+    row.innerHTML = '<span class="badge"></span><span class="path"></span><span class="st"></span>';
+    row.querySelector('.badge').textContent = sym;
+    row.querySelector('.path').textContent = f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
+    row.querySelector('.st').textContent = f.status;
+    row.title = `${f.status}: ${f.oldPath ? f.oldPath + ' → ' : ''}${f.path}`;
+    row.onclick = (e) => { e.stopPropagation(); selectCommitFile(c, f); };
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+// Accordion: clicking the selected commit collapses it again.
+async function selectCommit(c) {
+  const g = state.git;
+  if (g.selectedCommit && g.selectedCommit.sha === c.sha) {
+    g.selectedCommit = null;
+    g.commitFiles = [];
+    g.selectedCommitFile = null;
+    renderCommits();
+    return;
+  }
+  g.selectedCommit = c;
+  g.commitFiles = [];
+  g.selectedCommitFile = null;
+  renderCommits();
+  let files = [];
+  try {
+    files = (await window.api.git.commitFiles({ root: g.root, sha: c.sha })) || [];
+  } catch (e) {
+    setGitError(errText(e));
+  }
+  // The user may have clicked another commit while this was in flight.
+  if (!g.selectedCommit || g.selectedCommit.sha !== c.sha) return;
+  g.commitFiles = files;
+  renderCommits();
+}
+
+async function gitShowOrNull(root, ref, path) {
+  try {
+    return await window.api.git.showFile({ root, ref, path });
+  } catch (e) {
+    setGitError(errText(e));
+    return null;
+  }
+}
+
+// parent-of-commit on the left, commit on the right; both read-only.
+async function selectCommitFile(commit, file) {
+  const g = state.git;
+  g.selectedCommit = commit;
+  g.selectedCommitFile = file.path;
+  // Only one thing is highlighted at a time: drop the file-tree selection.
+  state.selected = null;
+  renderTree();
+  renderCommits();
+
+  let parentSha = (commit.parents && commit.parents[0]) || null;
+  if (!parentSha) {
+    try { parentSha = await window.api.git.parentOf({ root: g.root, sha: commit.sha }); }
+    catch { parentSha = null; }
+  }
+  const leftPath = file.oldPath || file.path;
+  const [L, R] = await Promise.all([
+    parentSha ? gitShowOrNull(g.root, parentSha, leftPath) : Promise.resolve(null),
+    gitShowOrNull(g.root, commit.sha, file.path)
+  ]);
+  const parentShort = parentSha ? parentSha.slice(0, 7) : null;
+  renderDiff({
+    leftTitle: parentShort ? `${parentShort}: ${leftPath}` + (L ? '' : ' (missing)') : '(missing)',
+    rightTitle: `${commit.short}: ${file.path}` + (R ? '' : ' (missing)'),
+    left: L,
+    right: R,
+    leftAbs: null,
+    rightAbs: null,
+    relPath: file.path,
+    commitFile: { commit, file },
+    editable: { left: false, right: false }
+  });
+}
+
+$('commit-search').addEventListener('input', (e) => {
+  state.git.commitQuery = e.target.value;
+  if (commitSearchTimer) clearTimeout(commitSearchTimer);
+  commitSearchTimer = setTimeout(() => {
+    commitSearchTimer = null;
+    loadCommits({ reset: true });
+  }, 400);
+});
+$('commit-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === 'Escape') {
+    e.preventDefault();
+    if (e.key === 'Escape') { e.target.value = ''; state.git.commitQuery = ''; }
+    if (commitSearchTimer) { clearTimeout(commitSearchTimer); commitSearchTimer = null; }
+    loadCommits({ reset: true });
+  }
+});
+$('commit-pickaxe').onchange = (e) => {
+  state.git.commitPickaxe = e.target.checked;
+  if (commitSearchTimer) { clearTimeout(commitSearchTimer); commitSearchTimer = null; }
+  loadCommits({ reset: true });
+};
+$('commit-more').onclick = () => loadCommits({ reset: false });
 
 async function pick(side) {
   const p = state.mode === 'folder' ? await window.api.pickFolder() : await window.api.pickFile();
@@ -579,8 +873,14 @@ function fmtBytes(n) {
 
 async function selectItem(it) {
   state.selected = it.path;
+  if (state.mode === 'git') {
+    // File tree and commit panel share the highlight; only one wins.
+    state.git.selectedCommitFile = null;
+    renderTree();
+    renderCommits();
+    return selectItemGit(it);
+  }
   renderTree();
-  if (state.mode === 'git') return selectItemGit(it);
   const res = await window.api.readPair({
     leftRoot: state.left, rightRoot: state.right, relPath: it.path
   });
@@ -693,8 +993,13 @@ function updateToolbar() {
 
   const isGit = state.mode === 'git';
   const g = state.git;
+  // A commit-file view is a pair of historical blobs: nothing to swap, nothing
+  // to write. It behaves exactly like the "neither side is current" case.
+  const isCommitFile = !!(d && d.commitFile);
 
-  btn('swap').disabled = isGit ? !(g.root && g.base && g.compare) : !hasPaths;
+  btn('swap').disabled = isGit
+    ? (isCommitFile || !(g.root && g.base && g.compare))
+    : !hasPaths;
   btn('refresh').disabled = !hasDiff;
 
   const isOnlyLeft = hasItem && d.item.status === 'only-left';
@@ -915,7 +1220,8 @@ async function reloadCurrent() {
   const d = state.currentDiff;
   if (!d) { updateToolbar(); return; }
   if (state.mode === 'git') {
-    if (d.item) await selectItem(d.item);
+    if (d.commitFile) await selectCommitFile(d.commitFile.commit, d.commitFile.file);
+    else if (d.item) await selectItem(d.item);
     updateToolbar();
     return;
   }
@@ -950,7 +1256,9 @@ async function reloadCurrent() {
 async function doRefresh() {
   const d = state.currentDiff;
   if (!d) return;
-  if (d.item) {
+  if (d.commitFile) {
+    await selectCommitFile(d.commitFile.commit, d.commitFile.file);
+  } else if (d.item) {
     await selectItem(d.item);
   } else if (state.mode === 'file' && state.left && state.right) {
     const res = await window.api.compareFiles({ leftPath: state.left, rightPath: state.right });

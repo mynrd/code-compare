@@ -219,6 +219,12 @@ describe('git-core', { skip: GIT_OK ? false : 'git is not on PATH' }, () => {
       const hits = await gitCore.log(repo, { grep: shas.first.slice(0, 7) });
       assert.deepEqual(hits.map(h => h.sha), [shas.first]);
     });
+    test('a sha prefix is found even when the commit is past the first page', async () => {
+      // limit 1 means the first page holds only the newest commit; the root
+      // commit must still be reachable by its prefix.
+      const hits = await gitCore.log(repo, { grep: shas.first.slice(0, 7), limit: 1 });
+      assert.deepEqual(hits.map(h => h.sha), [shas.first]);
+    });
     test('pickaxe finds the commit that introduced the text', async () => {
       const hits = await gitCore.log(repo, { pickaxe: 'NEEDLE_42' });
       assert.deepEqual(hits.map(h => h.sha), [shas.second]);

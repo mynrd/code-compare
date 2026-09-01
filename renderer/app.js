@@ -45,8 +45,15 @@ const state = {
   rightDisp: null,
   leftAbs: null,
   rightAbs: null,
-  saveTimers: {}
+  saveTimers: {},
+  // Git mode. Extended by later slices (commit panel / file history); keep the
+  // shape additive so nothing here has to be rewritten.
+  git: { root: null, branches: [], current: null, base: null, compare: null }
 };
+
+function freshGitState() {
+  return { root: null, branches: [], current: null, base: null, compare: null };
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -54,16 +61,250 @@ function setMode(m) {
   state.mode = m;
   $('mode-folder').classList.toggle('active', m === 'folder');
   $('mode-file').classList.toggle('active', m === 'file');
+  $('mode-git').classList.toggle('active', m === 'git');
   $('main-folder').classList.toggle('file-mode', m === 'file');
+  $('main-folder').classList.toggle('git-mode', m === 'git');
+  document.querySelector('header').classList.toggle('git-mode', m === 'git');
   state.left = null; state.right = null; state.items = []; state.tree = null;
   state.collapsed = new Set(); state.selected = null;
   $('left-path').value = ''; $('right-path').value = '';
+  state.git = freshGitState();
+  $('repo-path').value = '';
+  setGitError('');
+  clearBranchSelects();
   renderTree();
   renderDiff(null);
+  if (m === 'git') ensureGitAvailable();
+  else $('compare-btn').disabled = false;
 }
 
 $('mode-folder').onclick = () => setMode('folder');
 $('mode-file').onclick = () => setMode('file');
+$('mode-git').onclick = () => setMode('git');
+
+// ---------- git mode ----------
+
+// null = not probed yet. Once false we never issue another git call (AC 12).
+let gitAvailable = null;
+
+function setGitError(msg) { $('git-error').textContent = msg || ''; }
+
+function errText(e) { return String((e && (e.message || e.error)) || e || 'git command failed'); }
+
+function clearBranchSelects() {
+  for (const id of ['git-base', 'git-compare']) {
+    const sel = $(id);
+    sel.innerHTML = '';
+    sel.disabled = true;
+  }
+  $('git-hint').textContent = '';
+}
+
+function disableGitUI() {
+  $('repo-path').disabled = true;
+  $('pick-repo').disabled = true;
+  $('git-base').disabled = true;
+  $('git-compare').disabled = true;
+  $('compare-btn').disabled = true;
+}
+
+// Probe `git` once. Every git-mode entry point funnels through this so that a
+// machine without git makes exactly one call and then stops.
+async function ensureGitAvailable() {
+  if (gitAvailable === false) { setGitError('git not found'); disableGitUI(); return false; }
+  if (gitAvailable === true) return true;
+  try {
+    gitAvailable = !!(await window.api.git.hasGit());
+  } catch { gitAvailable = false; }
+  if (!gitAvailable) { setGitError('git not found'); disableGitUI(); return false; }
+  return true;
+}
+
+function mainBranchOf(names) {
+  if (names.includes('main')) return 'main';
+  if (names.includes('master')) return 'master';
+  return names[0] || null;
+}
+
+function fillBranchSelects() {
+  const g = state.git;
+  for (const [id, key] of [['git-base', 'base'], ['git-compare', 'compare']]) {
+    const sel = $(id);
+    sel.innerHTML = '';
+    for (const b of g.branches) {
+      const opt = document.createElement('option');
+      opt.value = b.name;
+      opt.textContent = b.current ? `${b.name} (current)` : b.name;
+      sel.appendChild(opt);
+    }
+    sel.disabled = !g.branches.length;
+    if (g[key]) sel.value = g[key];
+  }
+  $('git-hint').textContent = (g.root && !g.current)
+    ? 'Detached HEAD — no branch is checked out, so both panes are read-only'
+    : '';
+}
+
+async function loadRepo(root) {
+  let branches = [], current = null;
+  try {
+    branches = (await window.api.git.listBranches({ root })) || [];
+    // `git branch` emits a pseudo-entry like "(HEAD detached at abc123)" when
+    // HEAD is detached; it is not a ref anyone can diff against.
+    branches = branches.filter(b => !/^\((HEAD detached|no branch)/.test(b.name));
+    current = await window.api.git.currentBranch({ root });
+  } catch (e) {
+    setGitError(errText(e));
+    state.git = freshGitState();
+    clearBranchSelects();
+    updateToolbar();
+    return;
+  }
+  setGitError('');
+  $('repo-path').value = root;
+  const names = branches.map(b => b.name);
+  state.git = {
+    ...state.git,
+    root,
+    branches,
+    current: current || null,
+    base: mainBranchOf(names),
+    compare: (current && names.includes(current)) ? current : mainBranchOf(names)
+  };
+  fillBranchSelects();
+  updateToolbar();
+}
+
+function resetRepo(msg) {
+  setGitError(msg || '');
+  state.git = freshGitState();
+  state.items = []; state.tree = null; state.selected = null;
+  clearBranchSelects();
+  renderTree();
+  renderDiff(null);
+}
+
+async function resolveRepoFromInput() {
+  if (!(await ensureGitAvailable())) return;
+  const dir = normalizePath($('repo-path').value);
+  if (!dir) { resetRepo(''); return; }
+  if (dir === state.git.root) { setGitError(''); return; }
+  let root = null;
+  try { root = await window.api.git.repoRoot({ dir }); }
+  catch { root = null; }
+  if (!root) { resetRepo('Not a git repository'); return; }
+  await loadRepo(root);
+}
+
+$('repo-path').addEventListener('blur', resolveRepoFromInput);
+$('repo-path').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); resolveRepoFromInput(); }
+});
+
+$('pick-repo').onclick = async () => {
+  if (!(await ensureGitAvailable())) return;
+  const r = await window.api.git.pickRepo();
+  if (!r || r.canceled) return;
+  if (!r.root) { resetRepo(r.error || 'Not a git repository'); return; }
+  await loadRepo(r.root);
+};
+
+$('git-base').onchange = (e) => { state.git.base = e.target.value || null; };
+$('git-compare').onchange = (e) => { state.git.compare = e.target.value || null; };
+
+// git status letters -> the folder-tree item statuses the tree/diff code speaks.
+const GIT_STATUS_TO_ITEM = {
+  added: 'only-right',
+  deleted: 'only-left',
+  modified: 'modified',
+  renamed: 'modified'
+};
+
+async function runGitCompare() {
+  if (!(await ensureGitAvailable())) return;
+  const g = state.git;
+  if (!g.root || !g.base || !g.compare) {
+    if (!g.root) setGitError('Pick a repository first.');
+    return;
+  }
+  $('summary').textContent = 'Diffing…';
+  let entries;
+  try {
+    entries = await window.api.git.diffNameStatus({ root: g.root, base: g.base, compare: g.compare });
+  } catch (e) {
+    setGitError(errText(e));
+    state.items = []; state.tree = null;
+    renderTree(); renderDiff(null);
+    return;
+  }
+  setGitError('');
+  state.items = (entries || []).map(e => ({
+    path: e.path,
+    status: GIT_STATUS_TO_ITEM[e.status] || 'modified',
+    gitStatus: e.status,
+    oldPath: e.oldPath || null,
+    leftSize: null,
+    rightSize: null
+  }));
+  // The tree/summary/toolbar code reads state.left/right; branch names are the
+  // meaningful "sides" in git mode.
+  state.left = g.base; state.right = g.compare;
+  state.tree = buildTree(state.items);
+  state.collapsed = new Set();
+  state.selected = null;
+  state.treeSearch = '';
+  $('tree-search').value = '';
+  renderTree();
+  renderDiff(null);
+}
+
+// A side is editable only when its branch is the checked-out branch (and HEAD
+// is not detached) — that is the only side whose content is the working tree.
+function gitEditableSides() {
+  const g = state.git;
+  if (!g.current) return { left: false, right: false };
+  return { left: g.base === g.current, right: g.compare === g.current };
+}
+
+// Loads one pane. Editable -> the working-tree file (real path, so the existing
+// dirty/temp/Save flow applies). Read-only -> `git show <branch>:<path>`.
+async function loadGitSide(branch, relPath, editable) {
+  const g = state.git;
+  if (editable) {
+    const res = await window.api.readPair({ leftRoot: g.root, rightRoot: null, relPath });
+    const data = res && res.left ? res.left : null;
+    return { data, abs: data ? joinPath(g.root, relPath) : null };
+  }
+  try {
+    return { data: await window.api.git.showFile({ root: g.root, ref: branch, path: relPath }), abs: null };
+  } catch (e) {
+    setGitError(errText(e));
+    return { data: null, abs: null };
+  }
+}
+
+async function selectItemGit(it) {
+  const g = state.git;
+  const ed = gitEditableSides();
+  // For a rename the base ref only knows the old path.
+  const basePath = it.oldPath || it.path;
+  const comparePath = it.path;
+  const [L, R] = await Promise.all([
+    loadGitSide(g.base, basePath, ed.left),
+    loadGitSide(g.compare, comparePath, ed.right)
+  ]);
+  renderDiff({
+    leftTitle: `${g.base}: ${basePath}` + (L.data ? '' : ' (missing)'),
+    rightTitle: `${g.compare}: ${comparePath}` + (R.data ? '' : ' (missing)'),
+    left: L.data,
+    right: R.data,
+    leftAbs: L.abs,
+    rightAbs: R.abs,
+    relPath: it.path,
+    item: it,
+    editable: ed
+  });
+}
 
 async function pick(side) {
   const p = state.mode === 'folder' ? await window.api.pickFolder() : await window.api.pickFile();
@@ -79,6 +320,7 @@ $('left-path').addEventListener('input', (e) => { state.left = normalizePath(e.t
 $('right-path').addEventListener('input', (e) => { state.right = normalizePath(e.target.value) || null; });
 
 async function runCompare() {
+  if (state.mode === 'git') return runGitCompare();
   if (!state.left || !state.right) return;
   await rememberPair();
   if (state.mode === 'folder') {
@@ -125,6 +367,8 @@ $('tree-search').addEventListener('keydown', (e) => {
 // ---------- recent ----------
 
 async function rememberPair() {
+  // Git mode's "sides" are branch names, not paths — nothing useful to recall.
+  if (state.mode === 'git') return;
   const entry = { mode: state.mode, left: state.left, right: state.right, ts: Date.now() };
   const filtered = state.recent.filter(r =>
     !(r.mode === entry.mode && r.left === entry.left && r.right === entry.right));
@@ -211,15 +455,24 @@ function renderTree() {
   const list = $('tree-list');
   list.innerHTML = '';
   if (!state.tree) {
-    list.innerHTML = '<div class="empty">Pick two folders and click Compare.</div>';
+    list.innerHTML = state.mode === 'git'
+      ? '<div class="empty">Pick a repository, choose Base and Compare, then click Compare.</div>'
+      : '<div class="empty">Pick two folders and click Compare.</div>';
     $('summary').textContent = '';
     return;
   }
   const c = state.tree.counts;
   const total = c['only-left'] + c['only-right'] + c.modified + c.same;
-  $('summary').textContent = total
-    ? `${total} files · ${c.modified}≠ ${c['only-left']}◄ ${c['only-right']}► ${c.same}=`
-    : '';
+  if (state.mode === 'git') {
+    // added lands on the compare (right) side, deleted on the base (left) side.
+    $('summary').textContent = total
+      ? `${total} files · ${c.modified}≠ ${c['only-right']}+ ${c['only-left']}−`
+      : 'No differences';
+  } else {
+    $('summary').textContent = total
+      ? `${total} files · ${c.modified}≠ ${c['only-left']}◄ ${c['only-right']}► ${c.same}=`
+      : '';
+  }
 
   const frag = document.createDocumentFragment();
   if (state.treeSearch) {
@@ -303,13 +556,17 @@ function mkFileRow(it, depth) {
     <span class="size"></span>`;
   row.querySelector('.indent').style.width = (depth * 14) + 'px';
   row.querySelector('.badge').textContent = sym;
-  row.querySelector('.path').textContent = it.path.split('/').pop();
+  row.querySelector('.path').textContent = it.oldPath
+    ? `${it.oldPath} → ${it.path}`
+    : it.path.split('/').pop();
+  if (it.oldPath) row.title = `${it.oldPath} → ${it.path}`;
   row.querySelector('.size').textContent = formatSizes(it);
   row.onclick = () => selectItem(it);
   return row;
 }
 
 function formatSizes(it) {
+  if (it.leftSize == null && it.rightSize == null) return '';
   const l = it.leftSize != null ? fmtBytes(it.leftSize) : '—';
   const r = it.rightSize != null ? fmtBytes(it.rightSize) : '—';
   return `${l} / ${r}`;
@@ -323,6 +580,7 @@ function fmtBytes(n) {
 async function selectItem(it) {
   state.selected = it.path;
   renderTree();
+  if (state.mode === 'git') return selectItemGit(it);
   const res = await window.api.readPair({
     leftRoot: state.left, rightRoot: state.right, relPath: it.path
   });
@@ -355,6 +613,8 @@ function renderDiff(payload) {
   state.leftDisp = null; state.rightDisp = null;
   state.leftAbs = payload ? (payload.leftAbs || null) : null;
   state.rightAbs = payload ? (payload.rightAbs || null) : null;
+  const editable = editableFlags();
+  applyReadonlyHeaders(editable);
   updateToolbar();
   if (!payload) {
     $('diff-title-left').textContent = 'Left';
@@ -392,8 +652,8 @@ function renderDiff(payload) {
   const rightText = baseR == null ? null : String(baseR).replace(/\r\n?/g, '\n');
   if (leftText != null) state.leftDisp = splitLines(leftText);
   if (rightText != null) state.rightDisp = splitLines(rightText);
-  if (leftText == null) { renderSideBySide(view, '', rightText, { leftMissing: true }); drawMinimap(); updateDirtyHeader(); return; }
-  if (rightText == null) { renderSideBySide(view, leftText, '', { rightMissing: true }); drawMinimap(); updateDirtyHeader(); return; }
+  if (leftText == null) { renderSideBySide(view, '', rightText, { leftMissing: true, editable }); drawMinimap(); updateDirtyHeader(); return; }
+  if (rightText == null) { renderSideBySide(view, leftText, '', { rightMissing: true, editable }); drawMinimap(); updateDirtyHeader(); return; }
   if (textsEqualUnderOptions(leftText, rightText, state.compareOptions)) {
     view.innerHTML = '<div class="notice">Files are identical' +
       (anyCompareOpt(state.compareOptions) ? ' (under current compare options).' : '.') +
@@ -402,7 +662,7 @@ function renderDiff(payload) {
     updateDirtyHeader();
     return;
   }
-  renderSideBySide(view, leftText, rightText, {});
+  renderSideBySide(view, leftText, rightText, { editable });
   collectHunks();
   updateDirtyHeader();
   updateToolbar();
@@ -410,27 +670,52 @@ function renderDiff(payload) {
 
 function btn(act) { return document.querySelector(`#toolbar button[data-act="${act}"]`); }
 
+// Which panes accept edits. Folder/File mode never set payload.editable, so
+// both sides stay editable exactly as before; git mode narrows it.
+function editableFlags() {
+  const e = state.currentDiff && state.currentDiff.editable;
+  return {
+    left: !e || e.left !== false,
+    right: !e || e.right !== false
+  };
+}
+
+function applyReadonlyHeaders(ed) {
+  document.querySelector('.diff-header-left').classList.toggle('readonly', ed.left === false);
+  document.querySelector('.diff-header-right').classList.toggle('readonly', ed.right === false);
+}
+
 function updateToolbar() {
   const d = state.currentDiff;
   const hasItem = !!(d && d.item);
   const hasDiff = !!d;
   const hasPaths = !!(state.left && state.right);
 
-  btn('swap').disabled = !hasPaths;
+  const isGit = state.mode === 'git';
+  const g = state.git;
+
+  btn('swap').disabled = isGit ? !(g.root && g.base && g.compare) : !hasPaths;
   btn('refresh').disabled = !hasDiff;
 
   const isOnlyLeft = hasItem && d.item.status === 'only-left';
   const isOnlyRight = hasItem && d.item.status === 'only-right';
-  btn('copy-to-right').disabled = !isOnlyLeft;
-  btn('copy-to-left').disabled = !isOnlyRight;
+  // Whole-file copy is a folder-mode idea; there is no destination folder in
+  // git mode, so it is always off there.
+  btn('copy-to-right').disabled = isGit || !isOnlyLeft;
+  btn('copy-to-left').disabled = isGit || !isOnlyRight;
+
+  const ed = editableFlags();
+  // In git mode a side only counts when its branch is the checked-out one.
+  const hasEditableSide = !isGit ||
+    !!((ed.left && state.leftAbs) || (ed.right && state.rightAbs));
 
   const curHasDirty =
     (state.leftAbs && state.dirty.has(state.leftAbs)) ||
     (state.rightAbs && state.dirty.has(state.rightAbs));
   const histForCurrent = hasItem ? state.history.filter(h => h.itemPath === d.item.path) : [];
-  btn('save').disabled = !curHasDirty;
-  btn('save-all').disabled = state.dirty.size === 0;
-  btn('revert').disabled = !curHasDirty && histForCurrent.length === 0;
+  btn('save').disabled = !curHasDirty || !hasEditableSide;
+  btn('save-all').disabled = state.dirty.size === 0 || !hasEditableSide;
+  btn('revert').disabled = (!curHasDirty && histForCurrent.length === 0) || !hasEditableSide;
 
   // Always enabled when there are hunks — the buttons compute their target from
   // the scroll position, so "next" past the last just stays put rather than
@@ -480,6 +765,7 @@ function rebuildTreePreserveCollapsed() {
 let ctxMenuNode = null;
 
 function showFolderMenu(e, node) {
+  if (state.mode !== 'folder') return;
   e.preventDefault();
   ctxMenuNode = node;
   const menu = $('folder-ctx-menu');
@@ -505,6 +791,8 @@ $('ctx-refresh-folder').onclick = (e) => {
 };
 
 async function doRefreshFolder(node) {
+  // Sub-tree rescan reads two folders off disk — meaningless in git mode.
+  if (state.mode !== 'folder') return;
   if (!state.left || !state.right) return;
   const prefix = node.path ? node.path + '/' : '';
   const subLeft = node.path ? joinPath(state.left, node.path) : state.left;
@@ -626,6 +914,11 @@ async function doRevert() {
 async function reloadCurrent() {
   const d = state.currentDiff;
   if (!d) { updateToolbar(); return; }
+  if (state.mode === 'git') {
+    if (d.item) await selectItem(d.item);
+    updateToolbar();
+    return;
+  }
   if (d.item) {
     // re-read pair from disk for the currently-selected folder item.
     // Also recompute its status so the tree updates.
@@ -670,6 +963,15 @@ async function doRefresh() {
 }
 
 async function doSwap() {
+  if (state.mode === 'git') {
+    const g = state.git;
+    if (!g.root || !g.base || !g.compare) return;
+    [g.base, g.compare] = [g.compare, g.base];
+    $('git-base').value = g.base;
+    $('git-compare').value = g.compare;
+    await runGitCompare();
+    return;
+  }
   if (!state.left || !state.right) return;
   if (state.history.length || state.dirty.size) {
     if (!confirm('Pending edits and copy actions will be lost on swap. Continue?')) return;
@@ -947,8 +1249,12 @@ function renderSideBySide(view, leftText, rightText, opts) {
     <col class="gutter-col"><col class="code-col">
   </colgroup>`;
   const tbody = document.createElement('tbody');
-  const canEditLeft = !!state.leftAbs;
-  const canEditRight = !!state.rightAbs;
+  // opts.editable is only supplied by git mode; absent = both sides editable.
+  const ed = (opts && opts.editable) || {};
+  const roLeft = ed.left === false;
+  const roRight = ed.right === false;
+  const canEditLeft = !!state.leftAbs && !roLeft;
+  const canEditRight = !!state.rightAbs && !roRight;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const tr = document.createElement('tr');
@@ -968,6 +1274,8 @@ function renderSideBySide(view, leftText, rightText, opts) {
     const d = r.type === 'mod' ? charDiff(r.leftCode, r.rightCode) : null;
     setCodeCell(tr.children[1], r.leftCode, d, 'a');
     setCodeCell(tr.children[4], r.rightCode, d, 'b');
+    if (roLeft) tr.children[1].classList.add('readonly');
+    if (roRight) tr.children[4].classList.add('readonly');
     if (canEditLeft && r.leftLine !== '') {
       tr.children[1].contentEditable = 'plaintext-only';
       tr.children[1].dataset.side = 'left';
@@ -1014,8 +1322,16 @@ function renderSideBySide(view, leftText, rightText, opts) {
 
 // ---- Line / block merge (Devart-style copy to the other side) ----
 
+// A merge always writes into the *target* side: 'to-left' writes the left
+// file, 'to-right' the right one. Refuse when that target is read-only.
+function mergeTargetEditable(direction) {
+  const ed = editableFlags();
+  return direction === 'to-right' ? ed.right : ed.left;
+}
+
 function doMerge(rowIdx, direction, scope) {
   if (!state.rows || Number.isNaN(rowIdx)) return;
+  if (!mergeTargetEditable(direction)) return;
   const fn = scope === 'block' ? mergeHunk : mergeLine;
   const res = fn(state.rows, rowIdx, direction, state.leftDisp || [], state.rightDisp || []);
   if (!res.changed) return;
@@ -1036,6 +1352,7 @@ function doMerge(rowIdx, direction, scope) {
 
 function mergeCurrentHunk(direction) {
   if (!state.hunkRows.length) return;
+  if (!mergeTargetEditable(direction)) return;
   // Use the highlighted hunk if there is one, otherwise the hunk at the top
   // of the viewport (same rule Prev/Next use).
   let tr = state.hunkIdx >= 0 ? state.hunkRows[state.hunkIdx] : null;
@@ -1309,7 +1626,7 @@ $('group-delete').onclick = () => {
   state.selectedGroupIdx = state.fileScan.groups.length ? 0 : -1;
   state.compareOptions = cfg.compareOptions || { ignoreWhitespace: false, ignoreComments: false, ignoreLineBreaks: false };
   state.recent = cfg.recent || [];
-  if (cfg.lastMode) {
+  if (cfg.lastMode && cfg.lastMode !== 'git') {
     state.mode = cfg.lastMode;
     $('mode-folder').classList.toggle('active', state.mode === 'folder');
     $('mode-file').classList.toggle('active', state.mode === 'file');

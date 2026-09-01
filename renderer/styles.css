@@ -31,6 +31,27 @@ header {
   padding: 4px 8px; font: inherit;
 }
 .actions { display: flex; gap: 6px; align-items: center; }
+
+/* ---------- git mode bar ---------- */
+#git-bar { display: none; }
+header.git-mode .paths { display: none; }
+header.git-mode #git-bar { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+#git-bar .path-row label { width: auto; min-width: 40px; color: #999; }
+#git-bar .path-row label.cmp { margin-left: 12px; }
+#git-bar #repo-path {
+  flex: 1; background: #1e1e1e; color: #ddd; border: 1px solid #3f3f46;
+  padding: 4px 8px; font: inherit;
+}
+#git-bar select {
+  background: #1e1e1e; color: #ddd; border: 1px solid #3f3f46;
+  padding: 3px 6px; font: inherit; min-width: 150px; max-width: 240px;
+}
+#git-bar select:disabled, #git-bar input:disabled { color: #666; }
+#git-bar .branch-row { flex-wrap: wrap; }
+.status.error { color: #f48771; font-size: 11px; }
+#git-error:empty { display: none; }
+.git-hint { color: #dcdcaa; font-size: 11px; margin-left: 12px; }
+.git-hint:empty { display: none; }
 .recent-wrap { position: relative; }
 .popover {
   position: absolute; top: calc(100% + 4px); right: 0;
@@ -144,6 +165,16 @@ section { display: flex; flex-direction: column; overflow: hidden; }
 }
 .diff-header-left { border-right: 1px solid #333; }
 
+/* read-only pane (git mode: a branch that is not the checked-out one) */
+.diff-header-left.readonly, .diff-header-right.readonly { color: #888; background: #262628; }
+.ro-badge { display: none; }
+.diff-header-left.readonly .ro-badge,
+.diff-header-right.readonly .ro-badge {
+  display: inline-block; margin-left: 8px; padding: 0 5px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em;
+  color: #bbb; background: #3a3a3d; border: 1px solid #4a4a4f; border-radius: 2px;
+}
+
 .toolbar {
   display: flex; align-items: center; gap: 4px;
   padding: 4px 8px; background: #2d2d30;
@@ -206,6 +237,7 @@ section { display: flex; flex-direction: column; overflow: hidden; }
 .sbs-table tr.del td.gutter-right, .sbs-table tr.add td.gutter-left { background: #1a1a1a; }
 
 .sbs-table td.code[contenteditable] { outline: none; cursor: text; caret-color: #fff; }
+.sbs-table td.code.readonly { cursor: default; }
 .sbs-table td.code[contenteditable]:focus { background: #2a3a4a; }
 .sbs-table td.code.edited { box-shadow: inset 3px 0 0 #dcdcaa; }
 

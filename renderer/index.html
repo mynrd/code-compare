@@ -10,6 +10,7 @@
     <div class="mode-toggle">
       <button id="mode-folder" class="active">Folder</button>
       <button id="mode-file">File</button>
+      <button id="mode-git">Git</button>
     </div>
     <div class="paths">
       <div class="path-row">
@@ -21,6 +22,21 @@
         <label>Right</label>
         <input id="right-path" type="text" placeholder="Paste a path or click Browse…" />
         <button id="pick-right">Browse…</button>
+      </div>
+    </div>
+    <div id="git-bar">
+      <div class="path-row">
+        <label>Repository</label>
+        <input id="repo-path" type="text" placeholder="Paste a repository path or click Browse…" />
+        <button id="pick-repo">Browse…</button>
+        <span id="git-error" class="status error"></span>
+      </div>
+      <div class="path-row branch-row">
+        <label>Base</label>
+        <select id="git-base"></select>
+        <label class="cmp">Compare</label>
+        <select id="git-compare"></select>
+        <span id="git-hint" class="git-hint"></span>
       </div>
     </div>
     <div class="actions">
@@ -72,8 +88,8 @@
         <button data-act="zoom-reset" title="Reset zoom (Ctrl+0)">⟲</button>
       </div>
       <div class="diff-headers">
-        <div class="diff-header-left"><span id="diff-title-left">Left</span></div>
-        <div class="diff-header-right"><span id="diff-title-right">Right</span></div>
+        <div class="diff-header-left"><span id="diff-title-left">Left</span><span class="ro-badge">read-only</span></div>
+        <div class="diff-header-right"><span id="diff-title-right">Right</span><span class="ro-badge">read-only</span></div>
       </div>
       <div id="diff-view-wrap">
         <div id="diff-view"></div>

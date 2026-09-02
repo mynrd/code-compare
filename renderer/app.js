@@ -151,13 +151,16 @@ function mainBranchOf(names) {
 
 function fillBranchSelects() {
   const g = state.git;
+  // The checked-out branch is the one you reach for most, so it goes first;
+  // the rest stay in the alphabetical order listBranches produced.
+  const ordered = [...g.branches].sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0));
   for (const [id, key] of [['git-base', 'base'], ['git-compare', 'compare']]) {
     const sel = $(id);
     sel.innerHTML = '';
-    for (const b of g.branches) {
+    for (const b of ordered) {
       const opt = document.createElement('option');
       opt.value = b.name;
-      opt.textContent = b.current ? `${b.name} (current)` : b.name;
+      opt.textContent = b.current ? `${b.name} - current` : b.name;
       sel.appendChild(opt);
     }
     sel.disabled = !g.branches.length;
@@ -1228,6 +1231,20 @@ $('history-clear').onclick = (e) => {
   clearFileHistory();
 };
 
+// ---------- commits pane collapse ----------
+
+function setCommitsCollapsed(collapsed) {
+  $('commits-pane').classList.toggle('collapsed', collapsed);
+  const btn = $('commits-toggle');
+  btn.textContent = collapsed ? '▸' : '▾';
+  btn.title = collapsed ? 'Show commits' : 'Hide commits';
+  localStorage.setItem('commitsCollapsed', collapsed ? '1' : '0');
+}
+
+$('commits-pane').querySelector('.pane-header').onclick = () => {
+  setCommitsCollapsed(!$('commits-pane').classList.contains('collapsed'));
+};
+
 async function doRefreshFolder(node) {
   // Sub-tree rescan reads two folders off disk — meaningless in git mode.
   if (state.mode !== 'folder') return;
@@ -2057,6 +2074,8 @@ $('group-delete').onclick = () => {
 // ---------- init ----------
 
 (async function init() {
+  setCommitsCollapsed(localStorage.getItem('commitsCollapsed') === '1');
+
   const savedZoom = parseInt(localStorage.getItem('diffZoom') || '', 10);
   if (savedZoom >= 8 && savedZoom <= 40) state.zoom = savedZoom;
   applyZoom();

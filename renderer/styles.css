@@ -144,9 +144,10 @@ section { display: flex; flex-direction: column; overflow: hidden; }
 }
 .row:hover { background: #2a2d2e; }
 .row.selected { background: #094771; }
-.row .chev { width: 12px; color: #888; font-size: 10px; text-align: center; }
-.row .icon { font-size: 11px; }
-.row .badge { width: 14px; text-align: center; font-weight: bold; }
+.row .indent { flex: none; }
+.row .chev { flex: none; width: 12px; color: #888; font-size: 10px; text-align: center; }
+.row .icon { flex: none; font-size: 11px; }
+.row .badge { flex: none; width: 14px; text-align: center; font-weight: bold; }
 .row.only-left .badge, .row.only-left .path { color: #f48771; }
 .row.only-right .badge, .row.only-right .path { color: #6a9955; }
 .row.modified .badge { color: #dcdcaa; }
@@ -167,8 +168,18 @@ main.git-mode #commits-pane {
   border-top: 1px solid #333;
   overflow: hidden;
 }
-#commits-pane .pane-header { padding: 5px 12px; }
+#commits-pane .pane-header { padding: 5px 12px; gap: 6px; cursor: pointer; }
 #commits-summary { color: #999; font-size: 11px; margin-left: auto; }
+.commits-toggle {
+  background: transparent; color: #ccc; border: none;
+  padding: 0 2px; font-size: 10px; line-height: 1; cursor: pointer;
+  width: 14px; text-align: center;
+}
+.commits-toggle:hover { color: #fff; }
+main.git-mode #commits-pane.collapsed { flex: 0 0 auto; min-height: 0; }
+#commits-pane.collapsed #commit-search-bar,
+#commits-pane.collapsed #commit-list,
+#commits-pane.collapsed #commit-more { display: none; }
 #commits-title.history {
   color: #dcdcaa; font-weight: 600;
   max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
